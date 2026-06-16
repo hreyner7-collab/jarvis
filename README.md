@@ -85,10 +85,10 @@ Click the page once to enable audio, then speak. JARVIS will respond.
 
 JARVIS uses the browser's built-in speech recognition, which uses your system's default microphone. For best results:
 
-1. **Ensure your microphone is working**: Test it with your system's sound settings
-2. **Check browser permissions**: Allow microphone access when prompted
-3. **Use a quality microphone**: For best voice recognition, consider using a dedicated USB microphone
-4. **Reduce background noise**: Speak in a quiet environment
+- **Ensure your microphone is working**: Test it with your system's sound settings
+- **Check browser permissions**: Allow microphone access when prompted
+- **Use a quality microphone**: For best voice recognition, consider using a dedicated USB microphone
+- **Reduce background noise**: Speak in a quiet environment
 
 ## Configuration
 
