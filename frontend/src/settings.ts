@@ -10,7 +10,6 @@
 // ---------------------------------------------------------------------------
 
 interface StatusResponse {
-  claude_code_installed: boolean;
   calendar_accessible: boolean;
   mail_accessible: boolean;
   notes_accessible: boolean;
@@ -19,9 +18,7 @@ interface StatusResponse {
   server_port: number;
   uptime_seconds: number;
   env_keys_set: {
-    anthropic: boolean;
-    fish_audio: boolean;
-    fish_voice_id: boolean;
+    llm_configured: boolean;
     user_name: string;
   };
 }
@@ -39,7 +36,7 @@ interface PreferencesResponse {
 let panelEl: HTMLElement | null = null;
 let isOpen = false;
 let isFirstTimeSetup = false;
-let setupStep = 0; // 0=anthropic, 1=fish, 2=name, 3=done
+let setupStep = 0; // 0=llm, 1=name, 2=done
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -78,38 +75,44 @@ function buildPanelHTML(): string {
 
       <div class="settings-body">
 
-        <!-- API Keys -->
+        <!-- LLM Configuration -->
         <section class="settings-section" id="section-api-keys">
-          <h3>API Keys</h3>
+          <h3>Local LLM (Ollama)</h3>
 
           <div class="settings-field">
-            <label>Anthropic API Key</label>
+            <label>LLM API URL</label>
             <div class="settings-input-row">
-              <input type="password" id="input-anthropic-key" placeholder="sk-ant-..." />
-              <button class="settings-btn" id="btn-test-anthropic">Test</button>
-              <span class="status-dot" id="status-anthropic"></span>
+              <input type="text" id="input-llm-url" placeholder="http://localhost:11434/v1" />
+              <button class="settings-btn" id="btn-test-llm">Test</button>
+              <span class="status-dot" id="status-llm"></span>
             </div>
           </div>
 
           <div class="settings-field">
-            <label>Fish Audio API Key</label>
+            <label>Model Name</label>
             <div class="settings-input-row">
-              <input type="password" id="input-fish-key" placeholder="Fish Audio key..." />
-              <button class="settings-btn" id="btn-test-fish">Test</button>
-              <span class="status-dot" id="status-fish"></span>
-            </div>
-          </div>
-
-          <div class="settings-field">
-            <label>Fish Voice ID</label>
-            <div class="settings-input-row">
-              <input type="text" id="input-fish-voice-id" placeholder="612b878b113047d9a770c069c8b4fdfe" />
-              <button class="settings-btn" id="btn-save-voice-id">Save</button>
+              <input type="text" id="input-llm-model" placeholder="llama3.2:3b" />
             </div>
           </div>
 
           <div class="settings-actions">
-            <button class="settings-btn primary" id="btn-save-keys">Save Keys</button>
+            <button class="settings-btn primary" id="btn-save-keys">Save Settings</button>
+          </div>
+        </section>
+
+        <!-- TTS Test -->
+        <section class="settings-section" id="section-tts">
+          <h3>Voice (TTS)</h3>
+          <div class="settings-field">
+            <label>Edge TTS Voice</label>
+            <div class="settings-input-row">
+              <input type="text" id="input-tts-voice" placeholder="en-GB-RyanNeural" />
+              <button class="settings-btn" id="btn-save-tts-voice">Save</button>
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button class="settings-btn" id="btn-test-tts">Test Voice</button>
+            <span class="status-dot" id="status-tts"></span>
           </div>
         </section>
 
@@ -117,11 +120,10 @@ function buildPanelHTML(): string {
         <section class="settings-section" id="section-status">
           <h3>Connection Status</h3>
           <div class="status-grid">
-            <div class="status-row"><span class="status-dot" id="status-claude-cli"></span><span>Claude Code CLI</span></div>
+            <div class="status-row"><span class="status-dot" id="status-server"></span><span>Server</span><span class="status-detail" id="status-server-detail"></span></div>
             <div class="status-row"><span class="status-dot" id="status-calendar"></span><span>Apple Calendar</span></div>
             <div class="status-row"><span class="status-dot" id="status-mail"></span><span>Apple Mail</span></div>
             <div class="status-row"><span class="status-dot" id="status-notes"></span><span>Apple Notes</span></div>
-            <div class="status-row"><span class="status-dot" id="status-server"></span><span>Server</span><span class="status-detail" id="status-server-detail"></span></div>
           </div>
         </section>
 
@@ -205,7 +207,6 @@ async function loadStatus() {
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
 
-    setDotStatus("status-claude-cli", status.claude_code_installed ? "green" : "red");
     setDotStatus("status-calendar", status.calendar_accessible ? "green" : "red");
     setDotStatus("status-mail", status.mail_accessible ? "green" : "red");
     setDotStatus("status-notes", status.notes_accessible ? "green" : "red");
@@ -214,9 +215,8 @@ async function loadStatus() {
     const serverDetail = document.getElementById("status-server-detail");
     if (serverDetail) serverDetail.textContent = `port ${status.server_port} | up ${formatUptime(status.uptime_seconds)}`;
 
-    // API key status dots
-    setDotStatus("status-anthropic", status.env_keys_set.anthropic ? "green" : "red");
-    setDotStatus("status-fish", status.env_keys_set.fish_audio ? "green" : "red");
+    // LLM status
+    setDotStatus("status-llm", status.env_keys_set.llm_configured ? "green" : "red");
 
     // System info
     const memEl = document.getElementById("sysinfo-memory");
@@ -255,49 +255,60 @@ function wireEvents() {
   document.getElementById("settings-close")?.addEventListener("click", closeSettings);
   document.getElementById("settings-backdrop")?.addEventListener("click", closeSettings);
 
-  // Save keys
+  // Save LLM settings
   document.getElementById("btn-save-keys")?.addEventListener("click", async () => {
-    const anthropicKey = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
-    const fishKey = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
+    const apiUrl = (document.getElementById("input-llm-url") as HTMLInputElement).value.trim();
+    const model = (document.getElementById("input-llm-model") as HTMLInputElement).value.trim();
 
-    if (anthropicKey) {
-      await apiPost("/api/settings/keys", { key_name: "ANTHROPIC_API_KEY", key_value: anthropicKey });
+    if (apiUrl) {
+      await apiPost("/api/settings/keys", { key_name: "LLM_BASE_URL", key_value: apiUrl });
     }
-    if (fishKey) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_API_KEY", key_value: fishKey });
+    if (model) {
+      await apiPost("/api/settings/keys", { key_name: "LLM_MODEL", key_value: model });
     }
     await loadStatus();
   });
 
-  // Save voice ID
-  document.getElementById("btn-save-voice-id")?.addEventListener("click", async () => {
-    const voiceId = (document.getElementById("input-fish-voice-id") as HTMLInputElement).value.trim();
-    if (voiceId) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_VOICE_ID", key_value: voiceId });
+  // Save TTS voice
+  document.getElementById("btn-save-tts-voice")?.addEventListener("click", async () => {
+    const voice = (document.getElementById("input-tts-voice") as HTMLInputElement).value.trim();
+    if (voice) {
+      await apiPost("/api/settings/keys", { key_name: "TTS_VOICE", key_value: voice });
     }
   });
 
-  // Test Anthropic
-  document.getElementById("btn-test-anthropic")?.addEventListener("click", async () => {
-    setDotStatus("status-anthropic", "yellow");
-    const key = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
+  // Test LLM
+  document.getElementById("btn-test-llm")?.addEventListener("click", async () => {
+    setDotStatus("status-llm", "yellow");
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-anthropic", { key_value: key || undefined });
-      setDotStatus("status-anthropic", result.valid ? "green" : "red");
+      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-llm", { });
+      setDotStatus("status-llm", result.valid ? "green" : "red");
     } catch {
-      setDotStatus("status-anthropic", "red");
+      setDotStatus("status-llm", "red");
     }
   });
 
-  // Test Fish
-  document.getElementById("btn-test-fish")?.addEventListener("click", async () => {
-    setDotStatus("status-fish", "yellow");
-    const key = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
+  // Test TTS
+  document.getElementById("btn-test-tts")?.addEventListener("click", async () => {
+    setDotStatus("status-tts", "yellow");
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-fish", { key_value: key || undefined });
-      setDotStatus("status-fish", result.valid ? "green" : "red");
+      const result = await apiPost<{ valid: boolean; error?: string; audio?: string }>("/api/settings/test-tts", { });
+      if (result.valid && result.audio) {
+        const audioData = atob(result.audio);
+        const arrayBuffer = new ArrayBuffer(audioData.length);
+        const view = new Uint8Array(arrayBuffer);
+        for (let i = 0; i < audioData.length; i++) view[i] = audioData.charCodeAt(i);
+        const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+        const url = URL.createObjectURL(blob);
+        const audioEl = new Audio(url);
+        audioEl.onended = () => { URL.revokeObjectURL(url); };
+        audioEl.play();
+        setDotStatus("status-tts", "green");
+      } else {
+        setDotStatus("status-tts", "red");
+      }
     } catch {
-      setDotStatus("status-fish", "red");
+      setDotStatus("status-tts", "red");
     }
   });
 
@@ -333,29 +344,24 @@ function enterSetupMode() {
 }
 
 function showSetupStep(step: number) {
-  const sections = ["section-api-keys", "section-status", "section-preferences", "section-sysinfo"];
+  const sections = ["section-api-keys", "section-preferences", "section-sysinfo"];
   sections.forEach((id, i) => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (step === 0 && i === 0) el.style.display = "";
-    else if (step === 1 && i === 0) el.style.display = "";
-    else if (step === 2 && i === 2) el.style.display = "";
-    else if (step === 3) el.style.display = "";
-    else el.style.display = "none";
+    el.style.display = step === 0 || step === 1 || step === 2 ? "" : "none";
   });
 
   const nextBtn = document.getElementById("btn-setup-next");
   if (nextBtn) {
-    if (step === 0) nextBtn.textContent = "Next: Test Keys";
+    if (step === 0) nextBtn.textContent = "Next: Test Connection";
     else if (step === 1) nextBtn.textContent = "Next: Set Your Name";
-    else if (step === 2) nextBtn.textContent = "Finish Setup";
-    else nextBtn.style.display = "none";
+    else nextBtn.textContent = "Finish Setup";
   }
 }
 
 async function advanceSetup() {
   setupStep++;
-  if (setupStep >= 3) {
+  if (setupStep >= 2) {
     // Done — save everything and close
     isFirstTimeSetup = false;
     const welcome = document.getElementById("settings-welcome");
@@ -364,7 +370,7 @@ async function advanceSetup() {
     if (nav) nav.style.display = "none";
 
     // Show all sections
-    ["section-api-keys", "section-status", "section-preferences", "section-sysinfo"].forEach((id) => {
+    ["section-api-keys", "section-preferences", "section-sysinfo"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.style.display = "";
     });
@@ -400,7 +406,7 @@ export async function openSettings() {
   await loadPreferences();
 
   // Check for first-time setup
-  if (status && !status.env_keys_set.anthropic) {
+  if (status && !status.env_keys_set.llm_configured) {
     enterSetupMode();
   }
 }
@@ -424,7 +430,7 @@ export function isSettingsOpen(): boolean {
 export async function checkFirstTimeSetup(): Promise<boolean> {
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
-    if (!status.env_keys_set.anthropic) {
+    if (!status.env_keys_set.llm_configured) {
       openSettings();
       return true;
     }

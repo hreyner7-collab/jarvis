@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import anthropic
+from openai import AsyncOpenAI
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,10 +60,11 @@ log = logging.getLogger("jarvis")
 # Config
 # ---------------------------------------------------------------------------
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-FISH_API_KEY = os.getenv("FISH_API_KEY", "")
-FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
-FISH_API_URL = "https://api.fish.audio/v1/tts"
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
+# Free TTS — uses edge-tts (Microsoft Edge TTS, free, no API key needed)
+TTS_VOICE = os.getenv("TTS_VOICE", "en-GB-RyanNeural")  # British male voice, JARVIS-like
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
@@ -96,7 +97,7 @@ CONVERSATION STYLE:
 - When you don't know something: "I'm afraid I don't have that information, sir" not "I don't know"
 
 SELF-AWARENESS:
-You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code is Python (FastAPI server, WebSocket voice, Fish Audio TTS, Anthropic API). You were built by {user_name}. If asked about yourself, your code, how you work, or your line count — use [ACTION:PROMPT_PROJECT] to check the jarvis project. You have full access to your own source code.
+You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code is Python (FastAPI server, WebSocket voice, free TTS, local LLM via Ollama). You were built by {user_name}. If asked about yourself, your code, how you work, or your line count — use [ACTION:PROMPT_PROJECT] to check the jarvis project. You have full access to your own source code.
 
 YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT NOW):
 - You CAN open Terminal.app via AppleScript
@@ -139,7 +140,7 @@ If the user asks you to do something you genuinely can't do, say "I'm afraid tha
 YOUR INTERFACE:
 The user interacts with you through a web browser showing a particle orb visualization that reacts to your voice. The interface has these controls:
 - **Three-dot menu** (top right): contains Settings, Restart Server, and Fix Yourself options
-- **Settings panel**: Opens from the menu. Users can enter API keys (Anthropic, Fish Audio), test connections, set their name and preferences, and see system status (calendar, mail, notes connectivity). Keys are saved to the .env file.
+- **Settings panel**: Opens from the menu. Users can enter API keys (DeepSeek, Fish Audio), test connections, set their name and preferences, and see system status (calendar, mail, notes connectivity). Keys are saved to the .env file.
 - **Mute button**: Toggles your listening on/off. When muted, you can't hear the user. They click it again to unmute.
 - **Restart Server**: Restarts your backend process. Useful if something seems stuck.
 - **Fix Yourself**: Opens Claude Code in your own project directory so you can debug and fix issues in your own code.
@@ -712,34 +713,36 @@ def apply_speech_corrections(text: str) -> str:
 # LLM Intent Classifier (replaces keyword-based action detection)
 # ---------------------------------------------------------------------------
 
-async def classify_intent(text: str, client: anthropic.AsyncAnthropic) -> dict:
-    """Classify every user message using Haiku LLM.
+async def classify_intent(text: str, client: AsyncOpenAI) -> dict:
+    """Classify every user message using DeepSeek LLM.
 
     Returns: {"action": "open_terminal|browse|build|chat", "target": "description"}
     """
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=100,
-            system=(
-                "Classify this voice command. The user is talking to JARVIS, an AI assistant that can:\n"
-                "- Open Terminal and run Claude Code (coding AI tool)\n"
-                "- Open Chrome browser for web searches and URLs\n"
-                "- Build software projects via Claude Code in Terminal\n"
-                "- Research topics by opening Chrome search\n\n"
-                "Note: speech-to-text may produce errors like \"Cloud\" for \"Claude\", "
-                "\"Travis\" for \"JARVIS\", \"clock code\" for \"Claude Code\".\n\n"
-                "Return ONLY valid JSON: {\"action\": \"open_terminal|browse|build|chat\", "
-                "\"target\": \"description of what to do\"}\n"
-                "open_terminal = user wants to open terminal or launch Claude Code\n"
-                "browse = user wants to search the web, look something up, visit a URL\n"
-                "build = user wants to create/build a software project\n"
-                "chat = just conversation, questions, or anything else\n"
-                "If unclear, default to \"chat\"."
-            ),
-            messages=[{"role": "user", "content": text}],
+            messages=[
+                {"role": "system", "content": (
+                    "Classify this voice command. The user is talking to JARVIS, an AI assistant that can:\n"
+                    "- Open Terminal and run Claude Code (coding AI tool)\n"
+                    "- Open Chrome browser for web searches and URLs\n"
+                    "- Build software projects via Claude Code in Terminal\n"
+                    "- Research topics by opening Chrome search\n\n"
+                    "Note: speech-to-text may produce errors like \"Cloud\" for \"Claude\", "
+                    "\"Travis\" for \"JARVIS\", \"clock code\" for \"Claude Code\".\n\n"
+                    "Return ONLY valid JSON: {\"action\": \"open_terminal|browse|build|chat\", "
+                    "\"target\": \"description of what to do\"}\n"
+                    "open_terminal = user wants to open terminal or launch Claude Code\n"
+                    "browse = user wants to search the web, look something up, visit a URL\n"
+                    "build = user wants to create/build a software project\n"
+                    "chat = just conversation, questions, or anything else\n"
+                    "If unclear, default to \"chat\"."
+                )},
+                {"role": "user", "content": text},
+            ],
         )
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = json.loads(raw)
@@ -1023,25 +1026,27 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
             dispatch_registry.update_status(dispatch_id, "failed" if full_response else "timeout", response=full_response or "")
             msg = f"Sir, I ran into an issue with {project_name}. {full_response[:150] if full_response else 'No response received.'}"
         else:
-            # Summarize via Haiku — don't read word for word
-            if anthropic_client:
+            # Summarize via DeepSeek — don't read word for word
+            if llm_client:
                 try:
-                    summary = await anthropic_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                    summary = await llm_client.chat.completions.create(
+                        model=LLM_MODEL,
                         max_tokens=150,
-                        system=(
-                            "You are JARVIS reporting back on what you found or built in a project. "
-                            "Speak in first person — 'I found', 'I built', 'I reviewed'. "
-                            "Start with 'Sir, ' to get the user's attention. "
-                            "Be specific but concise — highlight the key findings or actions taken. "
-                            "If there are multiple items, give the count and top 2-3 briefly. "
-                            "End by asking how the user wants to proceed. "
-                            "NEVER read out URLs or localhost addresses. NEVER say 'Claude Code'. "
-                            "2-3 sentences max. No markdown. Natural spoken voice."
-                        ),
-                        messages=[{"role": "user", "content": f"Project: {project_name}\nClaude Code reported:\n{full_response[:3000]}"}],
+                        messages=[
+                            {"role": "system", "content": (
+                                "You are JARVIS reporting back on what you found or built in a project. "
+                                "Speak in first person — 'I found', 'I built', 'I reviewed'. "
+                                "Start with 'Sir, ' to get the user's attention. "
+                                "Be specific but concise — highlight the key findings or actions taken. "
+                                "If there are multiple items, give the count and top 2-3 briefly. "
+                                "End by asking how the user wants to proceed. "
+                                "NEVER read out URLs or localhost addresses. NEVER say 'Claude Code'. "
+                                "2-3 sentences max. No markdown. Natural spoken voice."
+                            )},
+                            {"role": "user", "content": f"Project: {project_name}\nClaude Code reported:\n{full_response[:3000]}"},
+                        ],
                     )
-                    msg = summary.content[0].text
+                    msg = summary.choices[0].message.content
                 except Exception:
                     msg = f"Sir, {project_name} finished. Here's the gist: {full_response[:200]}"
             else:
@@ -1092,15 +1097,17 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
         log.info(f"Background work complete ({len(full_response)} chars)")
 
         # Summarize and speak
-        if anthropic_client and full_response:
+        if llm_client and full_response:
             try:
-                summary = await anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                summary = await llm_client.chat.completions.create(
+                    model=LLM_MODEL,
                     max_tokens=100,
-                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
-                    messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
+                    messages=[
+                        {"role": "system", "content": "You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'."},
+                        {"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"},
+                    ],
                 )
-                msg = summary.content[0].text
+                msg = summary.choices[0].message.content
             except Exception:
                 msg = "Work is complete, sir."
 
@@ -1122,36 +1129,22 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (edge-tts — free, no API key needed)
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
-        return None
-
+    """Generate speech audio from text using edge-tts (free, Microsoft Edge TTS)."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
+        import edge_tts
+        communicate = edge_tts.Communicate(text, TTS_VOICE)
+        audio = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio += chunk["data"]
+        if audio:
+            _session_tokens["tts_calls"] += 1
+            _append_usage_entry(0, 0, "tts")
+        return audio or None
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None
@@ -1163,14 +1156,14 @@ async def synthesize_speech(text: str) -> Optional[bytes]:
 
 async def generate_response(
     text: str,
-    client: anthropic.AsyncAnthropic,
+    client: AsyncOpenAI,
     task_mgr: ClaudeTaskManager,
     projects: list[dict],
     conversation_history: list[dict],
     last_response: str = "",
     session_summary: str = "",
 ) -> str:
-    """Generate a JARVIS response using Anthropic API."""
+    """Generate a JARVIS response using DeepSeek API."""
     now = datetime.now()
     current_time = now.strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -1221,14 +1214,13 @@ async def generate_response(
         messages = messages + [{"role": "user", "content": text}]
 
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=250,  # Extra room for [ACTION:X] tags
-            system=system,
-            messages=messages,
+            messages=[{"role": "system", "content": system}] + messages,
         )
         track_usage(response)
-        return response.content[0].text
+        return response.choices[0].message.content
     except Exception as e:
         log.error(f"LLM error: {e}")
         return "Apologies, sir. I'm having trouble connecting to my language systems."
@@ -1240,7 +1232,7 @@ async def generate_response(
 
 # Shared state
 task_manager = ClaudeTaskManager(max_concurrent=3)
-anthropic_client: Optional[anthropic.AsyncAnthropic] = None
+llm_client: Optional[AsyncOpenAI] = None
 cached_projects: list[dict] = []
 recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
 dispatch_registry = DispatchRegistry()
@@ -1293,13 +1285,13 @@ def _get_usage_for_period(seconds: float | None = None) -> dict:
 
 
 def _cost_from_tokens(input_t: int, output_t: int) -> float:
-    return (input_t / 1_000_000) * 0.80 + (output_t / 1_000_000) * 4.00
+    return (input_t / 1_000_000) * 0.27 + (output_t / 1_000_000) * 0.27
 
 
 def track_usage(response):
-    """Track token usage from an Anthropic API response."""
-    inp = getattr(response.usage, "input_tokens", 0) if hasattr(response, "usage") else 0
-    out = getattr(response.usage, "output_tokens", 0) if hasattr(response, "usage") else 0
+    """Track token usage from an LLM API response."""
+    inp = getattr(response.usage, "prompt_tokens", 0) if hasattr(response, "usage") else 0
+    out = getattr(response.usage, "completion_tokens", 0) if hasattr(response, "usage") else 0
     _session_tokens["input"] += inp
     _session_tokens["output"] += out
     _session_tokens["api_calls"] += 1
@@ -1410,11 +1402,8 @@ return windowList
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    global anthropic_client, cached_projects
-    if ANTHROPIC_API_KEY:
-        anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    else:
-        log.warning("ANTHROPIC_API_KEY not set — LLM features disabled")
+    global llm_client, cached_projects
+    llm_client = AsyncOpenAI(api_key=LLM_API_KEY or "ollama", base_url=LLM_BASE_URL)
     cached_projects = []
 
     # Start context refresh in a separate thread (never touches event loop)
@@ -1762,8 +1751,8 @@ async def _do_mail_lookup() -> str:
 
 async def _do_screen_lookup() -> str:
     """Screen describe — runs in thread."""
-    if anthropic_client:
-        return await describe_screen(anthropic_client)
+    if llm_client:
+        return await describe_screen(llm_client)
     windows = await get_active_windows()
     if windows:
         apps = set(w["app"] for w in windows)
@@ -1851,16 +1840,18 @@ async def handle_browse(text: str, target: str) -> str:
     return "Searching for that, sir."
 
 
-async def handle_research(text: str, target: str, client: anthropic.AsyncAnthropic) -> str:
-    """Deep research with Opus — write results to HTML, open in browser."""
+async def handle_research(text: str, target: str, client: AsyncOpenAI) -> str:
+    """Deep research with DeepSeek — write results to HTML, open in browser."""
     try:
-        research_response = await client.messages.create(
-            model="claude-opus-4-6",
+        research_response = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=2000,
-            system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
-            messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
+            messages=[
+                {"role": "system", "content": f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible."},
+                {"role": "user", "content": f"Research this thoroughly:\n\n{target}"},
+            ],
         )
-        research_text = research_response.content[0].text
+        research_text = research_response.choices[0].message.content
 
         import html as _html
         html_content = f"""<!DOCTYPE html>
@@ -1889,15 +1880,16 @@ blockquote {{ border-left: 3px solid #0ea5e9; margin-left: 0; padding-left: 16px
         browser_name = "firefox" if "firefox" in text.lower() else "chrome"
         await open_browser(f"file://{results_file}", browser_name)
 
-        # Short voice summary via Haiku
-        summary = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        # Short voice summary via DeepSeek
+        summary = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=80,
-            system="Summarize this research in ONE sentence for voice. No markdown.",
-            messages=[{"role": "user", "content": research_text[:2000]}],
+            messages=[
+                {"role": "system", "content": "Summarize this research in ONE sentence for voice. No markdown."},
+                {"role": "user", "content": research_text[:2000]},
+            ],
         )
-        return summary.content[0].text + " Full results are in your browser, sir."
-
+        return summary.choices[0].message.content + " Full results are in your browser, sir."
     except Exception as e:
         log.error(f"Research failed: {e}")
         from urllib.parse import quote
@@ -1910,9 +1902,9 @@ blockquote {{ border-left: 3px solid #0ea5e9; margin-left: 0; padding-left: 16px
 async def _update_session_summary(
     old_summary: str,
     rotated_messages: list[dict],
-    client: anthropic.AsyncAnthropic,
+    client: AsyncOpenAI,
 ) -> str:
-    """Background Haiku call to update the rolling session summary."""
+    """Background DeepSeek call to update the rolling session summary."""
     prompt = f"""Update this conversation summary to include the new messages.
 
 Current summary: {old_summary or '(start of conversation)'}
@@ -1923,12 +1915,12 @@ New messages to incorporate:
 Write an updated summary in 2-4 sentences capturing the key topics, decisions, and context. Be concise."""
 
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         log.warning(f"Summary update failed: {e}")
         return old_summary  # Keep old summary on failure
@@ -2124,7 +2116,7 @@ async def voice_handler(ws: WebSocket):
                     if is_casual_question(user_text):
                         # Quick chat — bypass claude -p, use Haiku
                         response_text = await generate_response(
-                            user_text, anthropic_client, task_manager,
+                            user_text, llm_client, task_manager,
                             cached_projects, history,
                             last_response=last_jarvis_response,
                             session_summary=session_summary,
@@ -2137,7 +2129,7 @@ async def voice_handler(ws: WebSocket):
                         full_response = await work_session.send(user_text)
 
                         # Detect if Claude Code is stalling (asking questions instead of building)
-                        if full_response and anthropic_client:
+                        if full_response and llm_client:
                             stall_words = ["which option", "would you prefer", "would you like me to",
                                            "before I proceed", "before proceeding", "should I",
                                            "do you want me to", "let me know", "please confirm",
@@ -2161,9 +2153,9 @@ async def voice_handler(ws: WebSocket):
                             log.info(f"Auto-opening {localhost_match.group(0)}")
 
                         # Always summarize work mode responses via Haiku
-                        if full_response and anthropic_client:
+                        if full_response and llm_client:
                             try:
-                                summary = await anthropic_client.messages.create(
+                                summary = await llm_client.messages.create(
                                     model="claude-haiku-4-5-20251001",
                                     max_tokens=100,
                                     system=(
@@ -2224,11 +2216,11 @@ async def voice_handler(ws: WebSocket):
                         else:
                             response_text = "Understood, sir."
                     else:
-                        if not anthropic_client:
+                        if not llm_client:
                             response_text = "API key not configured."
                         else:
                             response_text = await generate_response(
-                                user_text, anthropic_client, task_manager,
+                                user_text, llm_client, task_manager,
                                 cached_projects, history,
                                 last_response=last_jarvis_response,
                                 session_summary=session_summary,
@@ -2381,11 +2373,11 @@ async def voice_handler(ws: WebSocket):
                     messages_since_last_summary = 0
                     # Get messages that are about to be rotated out
                     rotated = history[:-20] if len(history) > 20 else []
-                    if rotated and anthropic_client:
+                    if rotated and llm_client:
                         async def _do_summary():
                             nonlocal session_summary, summary_update_pending
                             session_summary = await _update_session_summary(
-                                session_summary, rotated, anthropic_client
+                                session_summary, rotated, llm_client
                             )
                             summary_update_pending = False
                         asyncio.create_task(_do_summary())
@@ -2393,8 +2385,8 @@ async def voice_handler(ws: WebSocket):
                         summary_update_pending = False
 
                 # Extract memories in background (doesn't block response)
-                if anthropic_client and len(user_text) > 15:
-                    asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
+                if llm_client and len(user_text) > 15:
+                    asyncio.create_task(extract_memories(user_text, response_text, llm_client))
 
                 # TTS
                 tts = strip_markdown_for_tts(response_text)
@@ -2491,42 +2483,31 @@ class PreferencesUpdate(BaseModel):
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "TTS_VOICE", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
     return {"success": True}
 
-@app.post("/api/settings/test-anthropic")
-async def api_test_anthropic(body: KeyTest):
-    key = body.key_value or os.getenv("ANTHROPIC_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
+@app.post("/api/settings/test-llm")
+async def api_test_llm(body: KeyTest):
+    key = body.key_value or LLM_API_KEY
+    base_url = LLM_BASE_URL
     try:
-        client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
+        client = AsyncOpenAI(api_key=key or "ollama", base_url=base_url)
+        await client.chat.completions.create(model=LLM_MODEL, max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
         return {"valid": True}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
-@app.post("/api/settings/test-fish")
-async def api_test_fish(body: KeyTest):
-    key = body.key_value or os.getenv("FISH_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
+@app.post("/api/settings/test-tts")
+async def api_test_tts(body: KeyTest):
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://api.fish.audio/v1/tts",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"text": "test", "reference_id": FISH_VOICE_ID},
-            )
-            if resp.status_code in (200, 201):
-                return {"valid": True}
-            elif resp.status_code == 401:
-                return {"valid": False, "error": "Invalid API key"}
-            else:
-                return {"valid": False, "error": f"HTTP {resp.status_code}"}
+        import base64
+        audio = await synthesize_speech("Testing audio, sir.")
+        if audio:
+            return {"valid": True, "audio": base64.b64encode(audio).decode()}
+        return {"valid": False, "error": "No audio generated"}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
@@ -2534,7 +2515,7 @@ async def api_test_fish(body: KeyTest):
 async def api_settings_status():
     import shutil as _shutil
     _, env_dict = _read_env()
-    claude_installed = _shutil.which("claude") is not None
+    ollama_installed = _shutil.which("ollama") is not None
     calendar_ok = mail_ok = notes_ok = False
     try: await get_todays_events(); calendar_ok = True
     except Exception: pass
@@ -2548,7 +2529,7 @@ async def api_settings_status():
     try: task_count = len(get_open_tasks())
     except Exception: pass
     return {
-        "claude_code_installed": claude_installed,
+        "ollama_installed": ollama_installed,
         "calendar_accessible": calendar_ok,
         "mail_accessible": mail_ok,
         "notes_accessible": notes_ok,
@@ -2557,9 +2538,7 @@ async def api_settings_status():
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
-            "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
+            "llm_configured": True,  # Ollama is used locally
             "user_name": env_dict.get("USER_NAME", ""),
         },
     }

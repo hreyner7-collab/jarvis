@@ -12,10 +12,13 @@ so JARVIS gets smarter over time.
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
 
 log = logging.getLogger("jarvis.memory")
 
@@ -402,30 +405,32 @@ def format_plan_for_voice(tasks: list[dict], events: list[dict]) -> str:
 # Memory extraction — learn from conversations
 # ---------------------------------------------------------------------------
 
-async def extract_memories(user_text: str, jarvis_response: str, anthropic_client) -> list[str]:
+async def extract_memories(user_text: str, jarvis_response: str, llm_client) -> list[str]:
     """After a conversation turn, extract any facts worth remembering.
 
-    Uses Haiku to decide if anything in the exchange is worth storing.
+    Uses DeepSeek to decide if anything in the exchange is worth storing.
     Returns list of memories stored.
     """
-    if not anthropic_client or len(user_text) < 15:
+    if not llm_client or len(user_text) < 15:
         return []
 
     try:
-        response = await anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await llm_client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=200,
-            system=(
-                "Extract facts worth remembering from this conversation. "
-                "Only extract CONCRETE facts: preferences, decisions, names, dates, plans, goals. "
-                "NOT opinions, greetings, or casual chat. "
-                "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10}] "
-                "Return [] if nothing worth remembering. Be very selective."
-            ),
-            messages=[{"role": "user", "content": f"User: {user_text}\nJARVIS: {jarvis_response}"}],
+            messages=[
+                {"role": "system", "content": (
+                    "Extract facts worth remembering from this conversation. "
+                    "Only extract CONCRETE facts: preferences, decisions, names, dates, plans, goals. "
+                    "NOT opinions, greetings, or casual chat. "
+                    "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10}] "
+                    "Return [] if nothing worth remembering. Be very selective."
+                )},
+                {"role": "user", "content": f"User: {user_text}\nJARVIS: {jarvis_response}"},
+            ],
         )
 
-        text = response.content[0].text.strip()
+        text = response.choices[0].message.content.strip()
         # Parse JSON
         if text.startswith("["):
             items = json.loads(text)

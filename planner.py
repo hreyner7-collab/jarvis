@@ -11,13 +11,16 @@ Handles:
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import anthropic
+from openai import AsyncOpenAI
 
 from templates import TEMPLATES, get_template
+
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
 
 log = logging.getLogger("jarvis.planner")
 
@@ -65,14 +68,14 @@ class PlanningDecision:
 
 async def detect_planning_mode(
     user_text: str,
-    client: Optional[anthropic.AsyncAnthropic] = None,
+    client: Optional[AsyncOpenAI] = None,
     force_bypass: bool = False,
 ) -> PlanningDecision:
     """Classify a user request as simple (execute now) or complex (needs planning).
 
     Args:
         user_text: The raw user request.
-        client: Anthropic async client for Haiku classification.
+        client: DeepSeek async client for classification.
         force_bypass: If True, skip planning and apply smart defaults.
 
     Returns:
@@ -124,41 +127,43 @@ def _quick_classify(text: str) -> str:
 
 
 async def _classify_planning_mode_llm(
-    text: str, client: anthropic.AsyncAnthropic
+    text: str, client: AsyncOpenAI
 ) -> PlanningDecision:
-    """Use Haiku to classify request and identify missing info."""
+    """Use DeepSeek to classify request and identify missing info."""
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
             max_tokens=400,
-            system=(
-                "You analyze development requests to decide if they need planning.\n"
-                "Respond with JSON only, no markdown fences.\n\n"
-                "Fields:\n"
-                "- needs_planning: bool — true if the request is vague or missing key details\n"
-                "- task_type: build|fix|research|refactor|simple\n"
-                "- confidence: float 0.0-1.0 — how confident you are in the classification\n"
-                "- missing_info: list[str] — what essential info is absent\n\n"
-                "Rules:\n"
-                "- Short/vague build requests ('make a website') → needs_planning=true\n"
-                "- Detailed requests with file paths, specifics → needs_planning=false\n"
-                "- Fix requests with specific file/line info → needs_planning=false\n"
-                "- Fix requests without context → needs_planning=true\n"
-                "- Simple questions/chat → needs_planning=false, task_type=simple\n"
-                "- missing_info should list specific things like: "
-                "project_name, tech_stack, design_requirements, target_file, "
-                "error_details, scope, expected_behavior\n\n"
-                "Examples:\n"
-                '{"needs_planning": true, "task_type": "build", "confidence": 0.95, '
-                '"missing_info": ["project_name", "tech_stack", "design_requirements"]}\n'
-                '{"needs_planning": false, "task_type": "fix", "confidence": 0.9, '
-                '"missing_info": []}\n'
-                '{"needs_planning": false, "task_type": "simple", "confidence": 0.99, '
-                '"missing_info": []}'
-            ),
-            messages=[{"role": "user", "content": text}],
+            messages=[
+                {"role": "system", "content": (
+                    "You analyze development requests to decide if they need planning.\n"
+                    "Respond with JSON only, no markdown fences.\n\n"
+                    "Fields:\n"
+                    "- needs_planning: bool — true if the request is vague or missing key details\n"
+                    "- task_type: build|fix|research|refactor|simple\n"
+                    "- confidence: float 0.0-1.0 — how confident you are in the classification\n"
+                    "- missing_info: list[str] — what essential info is absent\n\n"
+                    "Rules:\n"
+                    "- Short/vague build requests ('make a website') → needs_planning=true\n"
+                    "- Detailed requests with file paths, specifics → needs_planning=false\n"
+                    "- Fix requests with specific file/line info → needs_planning=false\n"
+                    "- Fix requests without context → needs_planning=true\n"
+                    "- Simple questions/chat → needs_planning=false, task_type=simple\n"
+                    "- missing_info should list specific things like: "
+                    "project_name, tech_stack, design_requirements, target_file, "
+                    "error_details, scope, expected_behavior\n\n"
+                    "Examples:\n"
+                    '{"needs_planning": true, "task_type": "build", "confidence": 0.95, '
+                    '"missing_info": ["project_name", "tech_stack", "design_requirements"]}\n'
+                    '{"needs_planning": false, "task_type": "fix", "confidence": 0.9, '
+                    '"missing_info": []}\n'
+                    '{"needs_planning": false, "task_type": "simple", "confidence": 0.99, '
+                    '"missing_info": []}'
+                )},
+                {"role": "user", "content": text},
+            ],
         )
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = json.loads(raw)
@@ -398,7 +403,7 @@ class TaskPlanner:
         self,
         user_request: str,
         projects: list[dict],
-        client: anthropic.AsyncAnthropic,
+        client: AsyncOpenAI,
     ) -> dict:
         """Analyze request and determine what questions to ask.
 
@@ -673,26 +678,28 @@ class TaskPlanner:
 
     # -- Private helpers --
 
-    async def _classify_request(self, text: str, client: anthropic.AsyncAnthropic) -> dict:
-        """Use Haiku to classify request type and extract known info."""
+    async def _classify_request(self, text: str, client: AsyncOpenAI) -> dict:
+        """Use DeepSeek to classify request type and extract known info."""
         try:
-            response = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await client.chat.completions.create(
+                model=LLM_MODEL,
                 max_tokens=300,
-                system=(
-                    "Classify this development request. Respond with JSON only, no markdown.\n"
-                    "Fields:\n"
-                    "- task_type: build|fix|research|refactor|run|feature\n"
-                    "- project: project name mentioned (or empty string)\n"
-                    "- inferred: dict of any info you can extract from the request "
-                    "(keys: tech_stack, details, error, target, goal, depth, output_format)\n"
-                    "Only include inferred keys that are clearly stated.\n"
-                    'Example: {"task_type": "build", "project": "roofo", '
-                    '"inferred": {"tech_stack": "React", "details": "landing page with hero and pricing"}}'
-                ),
-                messages=[{"role": "user", "content": text}],
+                messages=[
+                    {"role": "system", "content": (
+                        "Classify this development request. Respond with JSON only, no markdown.\n"
+                        "Fields:\n"
+                        "- task_type: build|fix|research|refactor|run|feature\n"
+                        "- project: project name mentioned (or empty string)\n"
+                        "- inferred: dict of any info you can extract from the request "
+                        "(keys: tech_stack, details, error, target, goal, depth, output_format)\n"
+                        "Only include inferred keys that are clearly stated.\n"
+                        'Example: {"task_type": "build", "project": "roofo", '
+                        '"inferred": {"tech_stack": "React", "details": "landing page with hero and pricing"}}'
+                    )},
+                    {"role": "user", "content": text},
+                ],
             )
-            raw = response.content[0].text.strip()
+            raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             return json.loads(raw)

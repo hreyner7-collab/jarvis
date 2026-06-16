@@ -10,10 +10,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 
 log = logging.getLogger("jarvis.screen")
+
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
 
 
 async def get_active_windows() -> list[dict]:
@@ -151,44 +154,33 @@ async def take_screenshot(display_only: bool = True) -> str | None:
             pass
 
 
-async def describe_screen(anthropic_client) -> str:
+async def describe_screen(llm_client) -> str:
     """Describe what's on the user's screen.
 
     Tries screenshot + vision first. Falls back to window list + LLM summary.
     """
     # Try screenshot + vision
     screenshot_b64 = await take_screenshot()
-    if screenshot_b64 and anthropic_client:
+    if screenshot_b64 and llm_client:
         try:
-            response = await anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await llm_client.chat.completions.create(
+                model=LLM_MODEL,
                 max_tokens=300,
-                system=(
-                    "You are JARVIS analyzing a screenshot of the user's desktop. "
-                    "Describe what you see concisely: which apps are open, what the user "
-                    "appears to be working on, any notable content visible. "
-                    "Be specific about app names, file names, URLs, code, or documents visible. "
-                    "2-4 sentences max. No markdown."
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": "What's on my screen right now?",
-                        },
-                    ],
-                }],
+                messages=[
+                    {"role": "system", "content": (
+                        "You are JARVIS analyzing a screenshot of the user's desktop. "
+                        "Describe what you see concisely: which apps are open, what the user "
+                        "appears to be working on, any notable content visible. "
+                        "Be specific about app names, file names, URLs, code, or documents visible. "
+                        "2-4 sentences max. No markdown."
+                    )},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+                        {"type": "text", "text": "What's on my screen right now?"},
+                    ]},
+                ],
             )
-            return response.content[0].text
+            return response.choices[0].message.content
         except Exception as e:
             log.warning(f"Vision call failed, falling back to window list: {e}")
 
@@ -212,18 +204,20 @@ async def describe_screen(anthropic_client) -> str:
         if bg_apps:
             context_parts.append(f"Background apps: {', '.join(bg_apps)}")
 
-    if anthropic_client and context_parts:
+    if llm_client and context_parts:
         try:
-            response = await anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await llm_client.chat.completions.create(
+                model=LLM_MODEL,
                 max_tokens=100,
-                system=(
-                    "You are JARVIS. Given the user's open windows and apps, summarize "
-                    "what they appear to be working on in 1-2 sentences. Natural voice, no markdown."
-                ),
-                messages=[{"role": "user", "content": "Open windows:\n" + "\n".join(context_parts)}],
+                messages=[
+                    {"role": "system", "content": (
+                        "You are JARVIS. Given the user's open windows and apps, summarize "
+                        "what they appear to be working on in 1-2 sentences. Natural voice, no markdown."
+                    )},
+                    {"role": "user", "content": "Open windows:\n" + "\n".join(context_parts)},
+                ],
             )
-            return response.content[0].text
+            return response.choices[0].message.content
         except Exception:
             pass
 
